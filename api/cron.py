@@ -1,46 +1,52 @@
+import os
+import json
+import requests
 from flask import Flask
-import os, json, asyncio
-from telegram import Bot
-import google.generativeai as genai
-from upstash_redis import Redis
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-ADMIN_ID = int(os.environ["ADMIN_ID"])
-CHANNEL_ID = os.environ["CHANNEL_ID"]
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+KV_URL = os.getenv("KV_REST_API_URL") or os.getenv("UPSTASH_REDIS_REST_URL") or os.getenv("STORAGE_URL") or os.getenv("KV_URL")
+KV_TOKEN = os.getenv("KV_REST_API_TOKEN") or os.getenv("UPSTASH_REDIS_REST_TOKEN") or os.getenv("STORAGE_TOKEN")
 
-redis = Redis(url=os.environ.get("KV_REST_API_URL"), token=os.environ.get("KV_REST_API_TOKEN"))
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+def kv_get(k):
+    try:
+        r = requests.get(f"{KV_URL}/get/{k}", headers={"Authorization": f"Bearer {KV_TOKEN}"}, timeout=10)
+        return r.json().get("result") if r.ok else None
+    except:
+        return None
 
-async def run_lesson():
-    bot = Bot(token=BOT_TOKEN)
-    raw = redis.get("progress")
-    progress = json.loads(raw) if raw else {"course":"python","class_no":0,"js_unlocked":False,"state":"learning"}
-    no = progress["class_no"]
-    if progress["course"] == "python" and no < 30:
-        lesson = model.generate_content(f"Python Class {no+1} Bangla mix").text
-        await bot.send_message(ADMIN_ID, f"PYTHON {no+1}/30\n{lesson}")
-        await bot.send_message(CHANNEL_ID, f"PYTHON {no+1}/30\n{lesson}")
-        progress["class_no"] += 1
-        redis.set("progress", json.dumps(progress))
-        return
-    if progress["course"] == "python" and no >= 30 and not progress["js_unlocked"]:
-        q = model.generate_content("Python MCQ + coding test").text
-        await bot.send_message(ADMIN_ID, f"FINAL TEST\n{q}")
-        progress["state"] = "waiting_test"
-        redis.set("progress", json.dumps(progress))
-        return
-    if progress["js_unlocked"]:
-        js = model.generate_content(f"JS Class {no+1} Python er sathe compare").text
-        await bot.send_message(ADMIN_ID, js)
-        await bot.send_message(CHANNEL_ID, js)
-        progress["class_no"] += 1
-        redis.set("progress", json.dumps(progress))
+def kv_set(k,v):
+    try:
+        requests.get(f"{KV_URL}/set/{k}/{v}", headers={"Authorization": f"Bearer {KV_TOKEN}"}, timeout=10)
+    except:
+        pass
 
-@app.route('/api/cron', methods=['GET'])
-def cron():
-    asyncio.run(run_lesson())
-    return "cron ok"
+def send(cid, txt):
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id":cid,"text":txt,"parse_mode":"Markdown"}, timeout=15)
+    except:
+        pass
+
+CLASSES = [f"*Day {i+1} Auto*\nPython+JS Task {i+1}\n/next diye poro" for i in range(90)]
+
+@app.route("/api/cron", methods=["GET","POST"])
+def cron_job():
+    if not KV_URL or not KV_TOKEN:
+        return "KV missing", 500
+    raw = kv_get("all_users") or "[]"
+    try:
+        users = json.loads(raw)
+    except:
+        users = []
+    sent = 0
+    for cid in users:
+        try:
+            prog = int(kv_get(f"progress:{cid}") or 0)
+            if prog < 90:
+                send(cid, f"⏰ *Daily Auto Class - 8AM BD*\n\n{CLASSES[prog]}")
+                kv_set(f"progress:{cid}", str(prog+1))
+                sent += 1
+        except:
+            continue
+    return f"Cron OK - Sent {sent}/{len(users)} users - KV:YES", 200
